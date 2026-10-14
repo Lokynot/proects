@@ -6,4 +6,4 @@ COPY loky.py .
 
 EXPOSE 8000
 
-CMD ["python", "-u", "loki.py"]
+CMD ["python", "-u", "loky.py"]
