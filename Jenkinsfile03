@@ -1,0 +1,128 @@
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_NAME = 'lokinotmefornow/maxloki26'
+    }
+
+    stages {
+
+        stage('1. Checkout') {
+            steps {
+                checkout scm
+                echo 'Source code checkout completed'
+            }
+        }
+
+        stage('2. Validate Files') {
+            steps {
+                sh '''
+                    test -f pro02.py
+                    test -f Dockerfile
+                    python3 -m py_compile pro02.py
+                '''
+                echo 'File validation successful'
+            }
+        }
+
+        stage('3. Build Docker Image') {
+            steps {
+                sh '''
+                    docker build \
+                      -t ${IMAGE_NAME}:${BUILD_NUMBER} \
+                      -t ${IMAGE_NAME}:latest .
+                '''
+            }
+        }
+
+        stage('4. Smoke Test') {
+            steps {
+                sh '''
+                    set -eu
+
+                    docker rm -f project02-smoke 2>/dev/null || true
+
+                    cleanup() {
+                        docker rm -f project02-smoke 2>/dev/null || true
+                    }
+
+                    trap cleanup EXIT
+
+                    docker run -d \
+                      --name project02-smoke \
+                      -p 18080:8000 \
+                      ${IMAGE_NAME}:${BUILD_NUMBER}
+
+                    for i in $(seq 1 15); do
+                        if curl -fsS http://localhost:18080/ \
+                           | grep -q "Project 02"; then
+                            echo "Smoke test PASSED"
+                            exit 0
+                        fi
+                        sleep 2
+                    done
+
+                    echo "Smoke test FAILED"
+                    docker logs project02-smoke
+                    exit 1
+                '''
+            }
+        }
+
+        stage('5. Push to Docker Hub') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-creds',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+
+                        echo "$DOCKER_PASS" |
+                          docker login -u "$DOCKER_USER" --password-stdin
+
+                        docker push ${IMAGE_NAME}:${BUILD_NUMBER}
+                        docker push ${IMAGE_NAME}:latest
+
+                        docker logout
+                    '''
+                }
+            }
+        }
+
+        stage('6. Deploy Application') {
+            steps {
+                sh '''
+                    docker rm -f project02-app 2>/dev/null || true
+
+                    docker run -d \
+                      --name project02-app \
+                      --restart unless-stopped \
+                      -p 8000:8000 \
+                      ${IMAGE_NAME}:${BUILD_NUMBER}
+
+                    sleep 3
+
+                    curl -fsS http://localhost:8000/
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Project 02 CI/CD pipeline completed successfully!'
+        }
+
+        failure {
+            echo 'Pipeline failed. Check Console Output.'
+        }
+
+        always {
+            echo 'Pipeline execution finished.'
+        }
+    }
+}
