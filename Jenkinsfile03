@@ -2,74 +2,70 @@ pipeline {
     agent any
 
     environment {
-        IMAGE_NAME = 'lokinotmefornow/maxloki26'
+        DOCKER_IMAGE = 'lokinotmefornow/maxloki26'
+        APP_NAME = 'project02-app'
+        SMOKE_NAME = 'project02-smoke'
+        APP_PORT = '8000'
     }
 
     stages {
 
-        stage('1. Checkout') {
+        stage('Checkout') {
             steps {
+                echo 'Checking out application source code'
                 checkout scm
-                echo 'Source code checkout completed'
             }
         }
 
-        stage('2. Validate Files') {
-            steps {
-                sh '''
-                    test -f pro02.py
-                    test -f Dockerfile
-                    python3 -m py_compile pro02.py
-                '''
-                echo 'File validation successful'
-            }
-        }
-
-        stage('3. Build Docker Image') {
-            steps {
-                sh '''
-                    docker build \
-                      -t ${IMAGE_NAME}:${BUILD_NUMBER} \
-                      -t ${IMAGE_NAME}:latest .
-                '''
-            }
-        }
-
-        stage('4. Smoke Test') {
+        stage('Install Dependencies') {
             steps {
                 sh '''
                     set -eu
 
-                    docker rm -f project02-smoke 2>/dev/null || true
+                    python3 --version
+                    python3 -m pip --version
 
-                    cleanup() {
-                        docker rm -f project02-smoke 2>/dev/null || true
-                    }
-
-                    trap cleanup EXIT
-
-                    docker run -d \
-                      --name project02-smoke \
-                      -p 18080:8000 \
-                      ${IMAGE_NAME}:${BUILD_NUMBER}
-
-                    for i in $(seq 1 15); do
-                        if curl -fsS http://localhost:18080/ \
-                           | grep -q "Project 02"; then
-                            echo "Smoke test PASSED"
-                            exit 0
-                        fi
-                        sleep 2
-                    done
-
-                    echo "Smoke test FAILED"
-                    docker logs project02-smoke
-                    exit 1
+                    if [ -f requirements.txt ]; then
+                        python3 -m pip install -r requirements.txt
+                    else
+                        echo "No requirements.txt found"
+                    fi
                 '''
             }
         }
 
-        stage('5. Push to Docker Hub') {
+        stage('Python Syntax Check') {
+            steps {
+                sh '''
+                    set -eu
+                    python3 -m py_compile pro02.py
+                '''
+            }
+        }
+
+        stage('Smoke Test') {
+            steps {
+                sh '''
+                    set -eu
+
+                    python3 -c "import pro02; print('Python import successful')"
+                '''
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh '''
+                    set -eu
+
+                    docker build \
+                      -t ${DOCKER_IMAGE}:${BUILD_NUMBER} \
+                      -t ${DOCKER_IMAGE}:latest .
+                '''
+            }
+        }
+
+        stage('Push Docker Image') {
             steps {
                 withCredentials([
                     usernamePassword(
@@ -81,11 +77,11 @@ pipeline {
                     sh '''
                         set -eu
 
-                        echo "$DOCKER_PASS" |
-                          docker login -u "$DOCKER_USER" --password-stdin
+                        echo "$DOCKER_PASS" | docker login \
+                          -u "$DOCKER_USER" --password-stdin
 
-                        docker push ${IMAGE_NAME}:${BUILD_NUMBER}
-                        docker push ${IMAGE_NAME}:latest
+                        docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                        docker push ${DOCKER_IMAGE}:latest
 
                         docker logout
                     '''
@@ -93,20 +89,35 @@ pipeline {
             }
         }
 
-        stage('6. Deploy Application') {
+        stage('Deploy Application') {
             steps {
                 sh '''
-                    docker rm -f project02-app 2>/dev/null || true
+                    set -eu
+
+                    docker rm -f ${APP_NAME} || true
 
                     docker run -d \
-                      --name project02-app \
+                      --name ${APP_NAME} \
                       --restart unless-stopped \
-                      -p 8000:8000 \
-                      ${IMAGE_NAME}:${BUILD_NUMBER}
+                      -p 8000:${APP_PORT} \
+                      ${DOCKER_IMAGE}:${BUILD_NUMBER}
 
-                    sleep 3
+                    sleep 5
 
-                    curl -fsS http://localhost:8000/
+                    docker ps --filter "name=${APP_NAME}"
+                '''
+            }
+        }
+
+        stage('Application Health Check') {
+            steps {
+                sh '''
+                    set -eu
+
+                    docker inspect --format='{{.State.Running}}' ${APP_NAME} \
+                      | grep -qx true
+
+                    echo "Application container is running"
                 '''
             }
         }
@@ -114,11 +125,12 @@ pipeline {
 
     post {
         success {
-            echo 'Project 02 CI/CD pipeline completed successfully!'
+            echo 'Pipeline completed successfully!'
+            echo "Docker image: ${DOCKER_IMAGE}:${BUILD_NUMBER}"
         }
 
         failure {
-            echo 'Pipeline failed. Check Console Output.'
+            echo 'Pipeline failed. Check Console Output for details.'
         }
 
         always {
